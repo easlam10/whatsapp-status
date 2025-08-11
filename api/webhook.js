@@ -1,5 +1,12 @@
 // api/webhook.js
 
+import getRawBody from 'raw-body';
+
+// Disable Vercel/Next.js built-in body parsing
+export const config = {
+  api: { bodyParser: false }
+};
+
 // Simple in-memory store for opt-in tracking (replace with DB in production)
 const optedInUsers = new Set();
 
@@ -20,7 +27,10 @@ export default async function handler(req, res) {
   // 2. Handle incoming webhook events
   if (req.method === 'POST') {
     try {
-      const body = req.body;
+      // Manually parse raw JSON body (works with Meta's application/json; charset=UTF-8)
+      const raw = await getRawBody(req);
+      const body = JSON.parse(raw.toString('utf8'));
+
       console.log('Incoming webhook:', JSON.stringify(body, null, 2));
 
       if (body.object === 'whatsapp_business_account') {
@@ -36,10 +46,22 @@ export default async function handler(req, res) {
             return res.status(200).send('EVENT_RECEIVED');
           }
 
+          console.log('Message type:', msg.type);
+          console.log('Button object:', msg.button);
+          console.log('Interactive object:', msg.interactive);
+
           // --- Detect button clicks ---
-          const isYesButton =
-            (msg.type === 'button' && msg.button?.payload === 'Yes, send updates') ||
-            (msg.interactive?.button_reply?.title === 'Yes, send updates');
+          const isYesButton = (() => {
+            if (msg.type === 'button') {
+              console.log('Button payload received:', msg.button?.payload);
+              return msg.button?.payload?.trim().toLowerCase() === 'yes, send updates';
+            }
+            if (msg.interactive?.button_reply?.title) {
+              console.log('Interactive button reply title received:', msg.interactive.button_reply.title);
+              return msg.interactive.button_reply.title?.trim().toLowerCase() === 'yes, send updates';
+            }
+            return false;
+          })();
 
           if (isYesButton) {
             console.log(`Button click detected from ${msg.from}`);
@@ -48,14 +70,13 @@ export default async function handler(req, res) {
             if (!optedInUsers.has(msg.from)) {
               optedInUsers.add(msg.from);
               console.log(`First-time opt-in from ${msg.from} — triggering Heroku`);
-              
-              await runHerokuCommand();
 
-              // Optional: confirmation message
-              await sendWhatsAppMessage(msg.from, 'Thanks! Your updates are being prepared.');
+              await runHerokuCommand();
             } else {
               console.log(`User ${msg.from} already opted in — no Heroku trigger`);
             }
+          } else {
+            console.log('No matching "Yes, send updates" button detected.');
           }
 
           // --- Detect status updates (delivered/read/failed) ---
@@ -116,4 +137,3 @@ async function runHerokuCommand() {
     console.error('Heroku execution failed:', error);
   }
 }
-
