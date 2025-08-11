@@ -1,107 +1,138 @@
 // api/webhook.js
-
 import getRawBody from 'raw-body';
 
-// Disable Vercel/Next.js built-in body parsing
 export const config = {
-  api: { bodyParser: false }
+  api: { bodyParser: false }, // Required for raw-body parsing on Vercel
 };
 
-// Simple in-memory store for opt-in tracking (replace with DB in production)
+// In-memory store for opt-in tracking (replace with DB in production)
 const optedInUsers = new Set();
 
 export default async function handler(req, res) {
-  // 1. Verification challenge (for initial WhatsApp webhook setup)
   if (req.method === 'GET') {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
-      console.log('WEBHOOK_VERIFIED');
-      return res.status(200).send(challenge);
-    }
-    return res.status(403).send('Verification failed');
+    return verifyWebhook(req, res);
   }
 
-  // 2. Handle incoming webhook events
   if (req.method === 'POST') {
-    try {
-      // Manually parse raw JSON body (works with Meta's application/json; charset=UTF-8)
-      const raw = await getRawBody(req);
-      const body = JSON.parse(raw.toString('utf8'));
-
-      console.log('Incoming webhook:', JSON.stringify(body, null, 2));
-
-      if (body.object === 'whatsapp_business_account') {
-        const entry = body.entry?.[0];
-        const changes = entry?.changes?.[0];
-
-        if (changes?.field === 'messages') {
-          const value = changes.value;
-          const msg = value?.messages?.[0];
-
-          if (!msg) {
-            console.log('No message found in webhook payload.');
-            return res.status(200).send('EVENT_RECEIVED');
-          }
-
-          console.log('Message type:', msg.type);
-          console.log('Button object:', msg.button);
-          console.log('Interactive object:', msg.interactive);
-
-          // --- Detect button clicks ---
-          const isYesButton = (() => {
-            if (msg.type === 'button') {
-              console.log('Button payload received:', msg.button?.payload);
-              return msg.button?.payload?.trim().toLowerCase() === 'yes, send updates';
-            }
-            if (msg.interactive?.button_reply?.title) {
-              console.log('Interactive button reply title received:', msg.interactive.button_reply.title);
-              return msg.interactive.button_reply.title?.trim().toLowerCase() === 'yes, send updates';
-            }
-            return false;
-          })();
-
-          if (isYesButton) {
-            console.log(`Button click detected from ${msg.from}`);
-
-            // --- Prevent duplicate triggers ---
-            if (!optedInUsers.has(msg.from)) {
-              optedInUsers.add(msg.from);
-              console.log(`First-time opt-in from ${msg.from} — triggering Heroku`);
-
-              await runHerokuCommand();
-            } else {
-              console.log(`User ${msg.from} already opted in — no Heroku trigger`);
-            }
-          } else {
-            console.log('No matching "Yes, send updates" button detected.');
-          }
-
-          // --- Detect status updates (delivered/read/failed) ---
-          if (value?.statuses) {
-            value.statuses.forEach(status => {
-              console.log('STATUS_UPDATE:', {
-                message_id: status.id,
-                status: status.status,
-                timestamp: new Date(status.timestamp * 1000),
-                recipient: status.recipient_id,
-                errors: status.errors
-              });
-            });
-          }
-        }
-      }
-
-      return res.status(200).send('EVENT_RECEIVED');
-    } catch (error) {
-      console.error('Webhook processing error:', error);
-      return res.status(500).send('SERVER_ERROR');
-    }
+    return handleWebhook(req, res);
   }
 
-  return res.status(405).send('Method Not Allowed');
+  res.status(405).send('Method Not Allowed');
+}
+
+// --- GET: Verification Challenge ---
+function verifyWebhook(req, res) {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
+    console.log('WEBHOOK_VERIFIED');
+    return res.status(200).send(challenge);
+  }
+
+  console.warn('Webhook verification failed', { mode, token });
+  return res.status(403).send('Verification failed');
+}
+
+// --- POST: Handle Incoming Events ---
+async function handleWebhook(req, res) {
+  try {
+    const raw = await getRawBody(req);
+    const body = JSON.parse(raw.toString('utf8'));
+
+    console.log('Webhook payload received:', JSON.stringify(body, null, 2));
+
+    if (body.object !== 'whatsapp_business_account') {
+      console.warn('Unexpected object type:', body.object);
+      return res.status(200).send('IGNORED');
+    }
+
+    const entry = body.entry?.[0];
+    const changes = entry?.changes?.[0];
+
+    if (changes?.field !== 'messages') {
+      console.log('Non-message change received:', changes?.field);
+      return res.status(200).send('IGNORED');
+    }
+
+    const value = changes.value;
+    const msg = value?.messages?.[0];
+
+    if (!msg) {
+      console.log('No message found in webhook payload.');
+      return res.status(200).send('EVENT_RECEIVED');
+    }
+
+    logMessageDetails(msg);
+
+    const isYesButton = detectYesButton(msg);
+    console.log('isYesButton result:', isYesButton);
+
+    if (isYesButton) {
+      if (!optedInUsers.has(msg.from)) {
+        optedInUsers.add(msg.from);
+        console.log(`✅ First-time opt-in from ${msg.from} — triggering Heroku`);
+        await runHerokuCommand();
+      } else {
+        console.log(`⚠️ User ${msg.from} already opted in — skipping trigger`);
+      }
+    } else {
+      console.log('No matching "Yes, send updates" button detected.');
+    }
+
+    logStatusUpdates(value?.statuses);
+
+    return res.status(200).send('EVENT_RECEIVED');
+  } catch (error) {
+    console.error('Webhook processing error:', error);
+    return res.status(500).send('SERVER_ERROR');
+  }
+}
+
+// --- Utility: Log message details ---
+function logMessageDetails(msg) {
+  console.log('Message type:', msg.type);
+  console.log('From:', msg.from);
+  if (msg.button) {
+    console.log('Button payload:', msg.button?.payload);
+    console.log('Button text:', msg.button?.text);
+  }
+  if (msg.interactive?.button_reply) {
+    console.log('Interactive button title:', msg.interactive.button_reply?.title);
+    console.log('Interactive button id:', msg.interactive.button_reply?.id);
+  }
+}
+
+// --- Utility: Detect "Yes, send updates" ---
+function detectYesButton(msg) {
+  const target = 'yes, send updates';
+
+  if (msg.type === 'button') {
+    const payload = msg.button?.payload?.trim().toLowerCase();
+    return payload === target;
+  }
+
+  if (msg.type === 'interactive' && msg.interactive?.button_reply?.title) {
+    const title = msg.interactive.button_reply.title.trim().toLowerCase();
+    return title === target;
+  }
+
+  return false;
+}
+
+// --- Utility: Log status updates ---
+function logStatusUpdates(statuses) {
+  if (!statuses) return;
+  statuses.forEach(status => {
+    console.log('STATUS_UPDATE:', {
+      message_id: status.id,
+      status: status.status,
+      timestamp: new Date(status.timestamp * 1000),
+      recipient: status.recipient_id,
+      errors: status.errors,
+    });
+  });
 }
 
 // --- Trigger a Heroku dyno ---
@@ -115,15 +146,15 @@ async function runHerokuCommand() {
       {
         method: 'POST',
         headers: {
-          'Accept': 'application/vnd.heroku+json; version=3',
-          'Authorization': `Bearer ${HEROKU_API_KEY}`,
-          'Content-Type': 'application/json'
+          Accept: 'application/vnd.heroku+json; version=3',
+          Authorization: `Bearer ${HEROKU_API_KEY}`,
+          'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           command: 'node src/index.js',
           attach: false,
-          type: 'worker'
-        })
+          type: 'worker',
+        }),
       }
     );
 
@@ -132,8 +163,8 @@ async function runHerokuCommand() {
       throw new Error(`Heroku API ${response.status}: ${errorData.message}`);
     }
 
-    console.log('Heroku command triggered successfully');
+    console.log('🚀 Heroku command triggered successfully');
   } catch (error) {
-    console.error('Heroku execution failed:', error);
+    console.error('❌ Heroku execution failed:', error);
   }
 }
