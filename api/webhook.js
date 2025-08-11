@@ -41,7 +41,7 @@ export default async function handler(req, res) {
           }
           
           // 2. Process button clicks
-          if (value?.messages?.[0]?.interactive?.button_reply?.title === "Yes, get updates") {
+          if (value?.messages?.[0]?.interactive?.button_reply?.title === "Yes, send updates") {
             console.log('OPT-IN RECEIVED - Triggering Heroku');
             await runHerokuCommand();
             
