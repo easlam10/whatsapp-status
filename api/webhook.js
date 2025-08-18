@@ -35,9 +35,9 @@ module.exports = async (req, res) => {
     let HEROKU_APP_NAME;
 
     // Determine which command to run based on button text
-    if (buttonText === 'Send email updates') {
+    if (buttonText === 'Update Email Prefs') {
       HEROKU_APP_NAME = 'ai-email-bot';
-    } else if (buttonText === 'Send edtech updates') {
+    } else if (buttonText === 'Adjust Edtech') {
       HEROKU_APP_NAME = 'edtech-scraper';
     } else {
       return res.status(200).json({ status: 'Unrecognized button command' });
