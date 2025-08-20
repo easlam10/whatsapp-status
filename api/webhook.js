@@ -62,10 +62,10 @@ module.exports = async (req, res) => {
     let HEROKU_APP_NAME;
 
     // Determine which command to run based on button text
-    if (buttonText === 'Update Email Prefs') {
+    if (buttonText === 'Email Information') {
       HEROKU_APP_NAME = 'ai-email-bot';
       console.log('Selected ai-email-bot');
-    } else if (buttonText === 'Adjust Edtech') {
+    } else if (buttonText === 'Edtech Information') {
       HEROKU_APP_NAME = 'edtech-scraper';
       console.log('Selected edtech-scraper');
     } else {
