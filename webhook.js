@@ -1,22 +1,29 @@
-// Vercel serverless function with WhatsApp verification and dual-command support
-module.exports = async (req, res) => {
-  // WhatsApp webhook verification
-  if (req.method === 'GET') {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
 
-    if (mode && token && process.env.WHATSAPP_VERIFY_TOKEN === token) {
-      return res.status(200).send(challenge);
-    }
-    return res.status(403).send('Verification failed');
+// Middleware to parse JSON bodies
+app.use(express.json());
+
+// Health check endpoint for Render
+app.get('/', (req, res) => {
+  res.status(200).send('WhatsApp Webhook Server is running');
+});
+
+// WhatsApp webhook verification - GET endpoint
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode && token && process.env.WHATSAPP_VERIFY_TOKEN === token) {
+    return res.status(200).send(challenge);
   }
+  return res.status(403).send('Verification failed');
+});
 
-  // Handle POST requests (actual messages)
-  if (req.method !== 'POST') {
-    return res.status(405).send('Method Not Allowed');
-  }
-
+// Handle POST requests (actual messages)
+app.post('/webhook', async (req, res) => {
   try {
     const payload = req.body;
     
@@ -58,9 +65,9 @@ module.exports = async (req, res) => {
       details: error.message 
     });
   }
-};
+});
 
-// Your EXACT Heroku command trigger function (modified for app parameter)
+// Heroku command trigger function
 async function triggerHerokuCommand(HEROKU_APP_NAME) {
   const HEROKU_API_KEY = process.env.HEROKU_API_KEY;
 
@@ -92,3 +99,8 @@ async function triggerHerokuCommand(HEROKU_APP_NAME) {
     throw error;
   }
 }
+
+// Start the server
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
