@@ -1,146 +1,154 @@
-// Vercel serverless function with WhatsApp verification and dual-command support
-module.exports = async (req, res) => {
-  console.log('=== INCOMING REQUEST ===');
-  console.log('Method:', req.method);
-  console.log('URL:', req.url);
-  console.log('Headers:', JSON.stringify(req.headers, null, 2));
-  
-  // WhatsApp webhook verification
-  if (req.method === 'GET') {
-    console.log('GET request - Webhook verification');
-    console.log('Query parameters:', req.query);
-    
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
+import dotenv from "dotenv";
+import axios from "axios";
 
-    console.log(`Verification attempt: mode=${mode}, token=${token}`);
-    
-    if (mode && token && process.env.WHATSAPP_VERIFY_TOKEN === token) {
-      console.log('Webhook verification SUCCESSFUL');
-      return res.status(200).send(challenge);
-    }
-    
-    console.log('Webhook verification FAILED');
-    return res.status(403).send('Verification failed');
-  }
+dotenv.config();
 
-  // Handle POST requests (actual messages)
-  if (req.method !== 'POST') {
-    console.log(`Invalid method: ${req.method}`);
-    return res.status(405).send('Method Not Allowed');
-  }
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
-  try {
-    console.log('POST request - Processing message');
-    const payload = req.body;
-    console.log('Request body:', JSON.stringify(payload, null, 2));
-    
-    // Verify webhook secret if set
-    if (process.env.WEBHOOK_SECRET && req.headers['x-hub-signature'] !== process.env.WEBHOOK_SECRET) {
-      console.log('Invalid signature provided');
-      return res.status(401).send('Invalid signature');
-    }
+// === HELPER FUNCTIONS ===
 
-    // Extract button click information
-    const buttonClick = payload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.button;
-    console.log('Button click extracted:', buttonClick);
-    
-    if (!buttonClick) {
-      console.log('No button interaction found');
-      
-      // Log the full structure to understand what's actually coming in
-      console.log('Full entry structure:', JSON.stringify(payload?.entry, null, 2));
-      console.log('Messages found:', payload?.entry?.[0]?.changes?.[0]?.value?.messages);
-      
-      return res.status(200).json({ status: 'No button interaction' });
-    }
-
-    const buttonText = buttonClick.text;
-    console.log(`Button text: "${buttonText}"`);
-    
-    let HEROKU_APP_NAME;
-
-    // Determine which command to run based on button text
-    if (buttonText === 'Email Information') {
-      HEROKU_APP_NAME = 'ai-email-bot';
-      console.log('Selected ai-email-bot');
-    } else if (buttonText === 'Edtech Information') {
-      HEROKU_APP_NAME = 'edtech-scraper';
-      console.log('Selected edtech-scraper');
-    } else {
-      console.log(`Unrecognized button command: "${buttonText}"`);
-      return res.status(200).json({ status: 'Unrecognized button command' });
-    }
-
-    console.log(`Triggering Heroku command for: ${HEROKU_APP_NAME}`);
-    
-    // Trigger Heroku command
-    const herokuResponse = await triggerHerokuCommand(HEROKU_APP_NAME);
-    
-    console.log('Heroku response received:', JSON.stringify(herokuResponse, null, 2));
-    
-    return res.status(200).json({
-      status: `Command triggered for ${HEROKU_APP_NAME}`,
-      heroku_response: herokuResponse
-    });
-
-  } catch (error) {
-    console.error('Webhook processing error:', error);
-    console.error('Error stack:', error.stack);
-    return res.status(500).json({ 
-      error: 'Internal server error',
-      details: error.message 
-    });
-  }
+// UTC+5 date helper
+const getCurrentUTCPLUS5Date = () => {
+  const now = new Date();
+  const utcPlus5Date = new Date(now.getTime() + 5 * 60 * 60 * 1000);
+  return utcPlus5Date.toISOString().split("T")[0];
 };
 
-// Your EXACT Heroku command trigger function (modified for app parameter)
-async function triggerHerokuCommand(HEROKU_APP_NAME) {
-  console.log(`Starting Heroku command for: ${HEROKU_APP_NAME}`);
-  const HEROKU_API_KEY = process.env.HEROKU_API_KEY;
+export const extractCategoryCounts = (aiResult) => {
+  const { categories, meta } = aiResult;
+  return {
+    executionNumber: meta.executionNumber,
+    date: meta.date,
+    total: meta.total,
+    hrCount: categories.HR.length,
+    marketingCount: categories.Marketing.length,
+    pnmCount: categories.PNM.length,
+    auditCount: categories.Audit.length,
+    accountsCount: categories.Accounts.length,
+    dcrCount: categories.DCR,
+    othersCount: categories.Others.length,
+  };
+};
 
-  // Check if API key is available
-  if (!HEROKU_API_KEY) {
-    console.error('HEROKU_API_KEY environment variable is not set');
-    throw new Error('Heroku API key not configured');
+export const generateCategoryBreakdownMessage = async (aiResult) => {
+  const { categories, meta } = aiResult;
+
+  const formatEmails = async (emails) => {
+    if (!emails || emails.length === 0) return "None";
+    return emails.map((email, index) => `${index + 1}. ${email.replace(/;/g, ",")}`).join("\r");
+  };
+
+  return {
+    executionNumber: meta.executionNumber,
+    date: meta.date,
+    HR: await formatEmails(categories.HR),
+    Marketing: await formatEmails(categories.Marketing),
+    PNM: await formatEmails(categories.PNM),
+    Audit: await formatEmails(categories.Audit),
+    Accounts: await formatEmails(categories.Accounts),
+    DCR: `${categories.DCR} emails`,
+    Others: await formatEmails(categories.Others),
+  };
+};
+
+// === SEND FUNCTIONS (UPDATED to one number) ===
+
+export async function sendWhatsAppCategorySummary(aiResult, recipientNumber) {
+  if (!recipientNumber) {
+    console.error("❌ No recipient number provided");
+    return;
   }
 
-  try {
-    console.log(`Making API call to Heroku for app: ${HEROKU_APP_NAME}`);
-    
-    const response = await fetch(
-      `https://api.heroku.com/apps/${HEROKU_APP_NAME}/dynos`,
-      {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/vnd.heroku+json; version=3',
-          'Authorization': `Bearer ${HEROKU_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          command: 'node src/index.js',
-          attach: false,
-          type: 'worker'
-        })
-      }
-    );
+  const url = `https://graph.facebook.com/v23.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+  const counts = extractCategoryCounts(aiResult);
 
-    console.log(`Heroku API response status: ${response.status}`);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`Heroku API error: ${response.status} - ${errorText}`);
-      throw new Error(`Heroku API ${response.status}: ${errorText}`);
-    }
-    
-    const responseData = await response.json();
-    console.log('Heroku API call successful');
-    return responseData;
-    
+  const payload = {
+    messaging_product: "whatsapp",
+    to: recipientNumber,
+    type: "template",
+    template: {
+      name: "email_updates_1",
+      language: { code: "en_US" },
+      components: [
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: counts.executionNumber.toString() },
+            { type: "text", text: counts.date },
+            { type: "text", text: counts.total.toString() },
+            { type: "text", text: counts.hrCount.toString() },
+            { type: "text", text: counts.marketingCount.toString() },
+            { type: "text", text: counts.pnmCount.toString() },
+            { type: "text", text: counts.auditCount.toString() },
+            { type: "text", text: counts.accountsCount.toString() },
+            { type: "text", text: counts.dcrCount.toString() },
+            { type: "text", text: counts.othersCount.toString() },
+          ],
+        },
+      ],
+    },
+  };
+
+  try {
+    console.log(`📤 Sending summary to ${recipientNumber}`);
+    const response = await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    });
+    console.log(`✅ Summary sent to ${recipientNumber}`, response.data);
   } catch (error) {
-    console.error('Heroku trigger failed:', error);
-    console.error('Error details:', error.message);
-    throw error;
+    console.error(`❌ Error sending summary to ${recipientNumber}:`, error.response?.data || error.message);
+  }
+}
+
+export async function sendWhatsAppCategoryBreakdown(aiResult, recipientNumber) {
+  if (!recipientNumber) {
+    console.error("❌ No recipient number provided");
+    return;
+  }
+
+  const url = `https://graph.facebook.com/v23.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+  const breakdown = await generateCategoryBreakdownMessage(aiResult);
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to: recipientNumber,
+    type: "template",
+    template: {
+      name: "email_updates_2",
+      language: { code: "en_US" },
+      components: [
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: breakdown.executionNumber?.toString() || "" },
+            { type: "text", text: breakdown.date || "" },
+            { type: "text", text: breakdown.HR || "None" },
+            { type: "text", text: breakdown.Marketing || "None" },
+            { type: "text", text: breakdown.PNM || "None" },
+            { type: "text", text: breakdown.Audit || "None" },
+            { type: "text", text: breakdown.Accounts || "None" },
+            { type: "text", text: breakdown.DCR || "None" },
+            { type: "text", text: breakdown.Others || "None" },
+          ],
+        },
+      ],
+    },
+  };
+
+  try {
+    console.log(`📤 Sending breakdown to ${recipientNumber}`);
+    const response = await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    });
+    console.log(`✅ Breakdown sent to ${recipientNumber}`, response.data);
+  } catch (error) {
+    console.error(`❌ Error sending breakdown to ${recipientNumber}:`, error.response?.data || error.message);
   }
 }
