@@ -60,6 +60,7 @@ module.exports = async (req, res) => {
 };
 
 // Trigger Heroku dyno and pass WA_ID
+// In triggerHerokuCommand function:
 async function triggerHerokuCommand(HEROKU_APP_NAME, wa_id) {
   const HEROKU_API_KEY = process.env.HEROKU_API_KEY;
   if (!HEROKU_API_KEY) throw new Error("Heroku API key not configured");
@@ -74,7 +75,7 @@ async function triggerHerokuCommand(HEROKU_APP_NAME, wa_id) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        command: `WA_ID=${wa_id} node src/index.js`, // ✅ Pass user number
+        command: `node src/index.js ${wa_id}`, // ✅ Pass as argument
         attach: false,
         type: "worker",
       }),
